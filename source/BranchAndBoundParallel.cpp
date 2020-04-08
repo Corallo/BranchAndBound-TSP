@@ -9,7 +9,8 @@
 #include <list>
 #include <mpi.h>
 #include <limits.h>
-#define COMUNICATION_SWITCH 1
+#include <algorithm>
+#define COMUNICATION_SWITCH 0
 using namespace std;
 
 int checkEndState(int** M, int V);
@@ -56,7 +57,6 @@ int main(int argc, char* argv[]) {
     }
     myfile.close();
     /********************************Read file ******************************/
-    priority_queue<pair<int, int**>> priorityQueue;
     int** firstSol = createFirstSol(V);
     int* finalSol = (int*)(calloc(V, sizeof(int)));
     int finalCost = INT_MAX;
@@ -72,7 +72,7 @@ int main(int argc, char* argv[]) {
     auto start = chrono::steady_clock::now();
     counter=0;
     maxDeep=0;
-    cout<<"size:"<<size<<endl;;
+    //cout<<"size:"<<size<<endl;;
     int flag=ParallelTSP(C, V, firstSol, finalSol, finalCost,p,size);
 
 
@@ -82,16 +82,32 @@ int main(int argc, char* argv[]) {
     auto end = chrono::steady_clock::now();
     duration = chrono::duration_cast<chrono::milliseconds>(end - start).count();
     
-    if( flag ){
-        cout << "Solution:\n" << "Cost:" << finalCost << endl << "Path:" << endl;
+    
+    cout << endl;
+    cout << "Processor: "<<p<<endl;
+    cout << "Time elapsed: " << duration << "ms" << endl;
+    cout << "State explored counter: "<<counter<<endl;
+    cout << "My optimal cost: "<<finalCost<<endl;
+    cout << "Deepth explored: "<<maxDeep<<endl;
+    
+    if(flag==0){
+        finalCost  = INT_MAX;
+    }
+    MPI_Barrier( MPI_COMM_WORLD );
+    int *solList = (int *)malloc(sizeof(int) * size);
+    MPI_Allgather(&finalCost, 1, MPI_INT, solList, 1, MPI_INT, MPI_COMM_WORLD);
+    int min_idx = min_element(solList,solList+size) - solList;
+
+    if(p==min_idx){
+        cout <<endl<<endl<< "Final solution from "<<p<<" :\n" << "Cost:" << finalCost << endl << "Path:" << endl;
         for (int i = 0; i < V + 1; i++) {
             cout << finalSol[i] << " ";
         }
+
+    cout<<endl;
     }
-    cout << endl;
-    cout << "Time elapsed: " << duration << "ms" << endl;
-    cout << "counter: "<<counter<<endl;
-    cout << "Deep: "<<maxDeep<<endl;
+
+
     MPI_Finalize();
     return 0;
 }
@@ -135,57 +151,30 @@ void TspExploreToFirstSolution(int V, int** M, int p,int size){
 
 void TspStep(int** C, int V, int** M, int* Bestsolution, int& bestCost, int p, int size,MPI_Request request, MPI_Status status, int step, int* besttmp, int* bestIsMine)
 {
-    /*
-    cout << "new step:" << endl;
-    for(int q=0;q<V;q++)
-    {
-        for(int z=0;z<V;z++)
-        {
-            printf("%d ", M[q][z]);
-        }
-        printf("\n");
-
-    }
-
-    printf("\n");
-    printf("\n");
-
-    printf("\n");
-    */
-
-    /*
     
-    for (int i=0;i<size;i++){
-        if(i!=p){
-            MPI_Ibcast(besttmp, 1, MPI_INT, i, MPI_COMM_WORLD, &found_request);
-        }
-    }
-    */
-    //printLog("Processor "+to_string(p)+" is exploring at step: "+to_string(step), M, V);
-    counter++;
-
+    counter++; //Global variable, it count the number of "nodes" in the tree visidet for each processor
+    //cout<<counter<<endl;
     if(step>maxDeep){
-        maxDeep=step;
+        maxDeep=step; //Global variable, it count the max deepth reached by this processor
     }
-    if(COMUNICATION_SWITCH){
-    int flag=0;
+    if(COMUNICATION_SWITCH){ //constant ( #define  on top ) to enable/disable comunication between processors
+    int flag=0; //flag == 1 if it will recieve a new solution from another processor
         if(step==0){ // first time
-
-            MPI_Irecv(besttmp, 1, MPI_INT, MPI_ANY_SOURCE,0, MPI_COMM_WORLD, &request);
-            MPI_Test(&request, &flag, &status);
-        }else if(counter%500==0) {
+            MPI_Irecv(besttmp, 1, MPI_INT, MPI_ANY_SOURCE,0, MPI_COMM_WORLD, &request); //Non blocking recv from all other processor to exange the best sol
+            MPI_Test(&request, &flag, &status); //Test if I recived something from someone else 
+        }else if(counter%500==0) { // Polling each 500 state visited.
             MPI_Test(&request, &flag, &status);
         }
-        if(flag!=0){
+        if(flag!=0){ //IF p recived  something
         
         cout<<"I am "<<p<<"  today  "<<status.MPI_SOURCE<< "  sent me something: "<<*besttmp<<endl;
         cout<<"My current best is "<<bestCost<<endl;
-            if(*besttmp<bestCost){
-            //cout<<"Updating value!"<<endl;
-                bestCost=*besttmp;
-                *bestIsMine=0;
+            if(*besttmp<bestCost){ //And the solution recived is better than mine
+            cout<<"Updating value!"<<endl;
+                bestCost=*besttmp; //Update my solution
+                *bestIsMine=0; //Flag that says that I am not the processor that has the optimal solution
             }
-            MPI_Irecv(&besttmp, 1, MPI_INT, MPI_ANY_SOURCE,0, MPI_COMM_WORLD, &request);
+            MPI_Irecv(&besttmp, 1, MPI_INT, MPI_ANY_SOURCE,0, MPI_COMM_WORLD, &request); //p open a new comunication channel, to wait for new sol
         }
     }
 
@@ -193,11 +182,12 @@ void TspStep(int** C, int V, int** M, int* Bestsolution, int& bestCost, int p, i
     if (checkEndState(M, V) == 1) {          //END STATE
         int tmp_cost = checkCost(M, C, V);
 
-        if (tmp_cost < bestCost && checkFinalSol(M, V)) {
+        if (tmp_cost < bestCost && checkFinalSol(M, V)) { //check bestCost and if finalSol is correct 
             bestCost = tmp_cost;
             saveBestSol(Bestsolution, M, V);
+            *bestIsMine=1;
             cout<<"Processor "<< p<< " Found a better solution : "<<bestCost<<endl;
-           if(COMUNICATION_SWITCH){
+           if(COMUNICATION_SWITCH){ //Send to all the other p
                 for(int i=0;i<size;i++){
                     if(i!=p){
                         MPI_Request new_request;
@@ -205,9 +195,10 @@ void TspStep(int** C, int V, int** M, int* Bestsolution, int& bestCost, int p, i
                         //MPI_Send(&bestCost, 1, MPI_INT, i, 0, MPI_COMM_WORLD); 
                     }
                 }
+
             }
-            *bestIsMine=1;
-            cout<<"I sent "<<bestCost <<" to all other processors"<<endl;
+            
+            //cout<<"I sent "<<bestCost <<" to all other processors"<<endl;
             //MPI_Ibcast(&bestCost, 1, MPI_INT, p, MPI_COMM_WORLD, &found_request);
             //MPI_Wait(&found_request, MPI_STATUS_IGNORE);
         }
