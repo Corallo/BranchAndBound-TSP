@@ -10,7 +10,9 @@
 #include <mpi.h>
 #include <limits.h>
 #include <algorithm>
-#define COMUNICATION_SWITCH 0
+#define COMUNICATION_SWITCH 1
+#define DEBUGLOG 0
+#define POLLINGRATE 500
 using namespace std;
 
 int checkEndState(int** M, int V);
@@ -25,19 +27,32 @@ int** createFirstSol(int V);
 pair<int, int> findNextChild(int** M, int V);
 bool checkFinalSol(int** tmp_sol, int V);
 int checkConstrain(int** M, int V);
-void TspStep(int** C, int V, int** M, int* Bestsolution, int& bestCost, int p, int size, MPI_Request request, MPI_Status status,int step,int* besttmp, int* bestIsMine);
+void TspStep(int** M, int step);
 void rollBackChanges(int** M, int V, list<int> changeLog);
 void printLog(string message, int** M, int V);
-int ParallelTSP(int** C, int V, int** M, int* Bestsolution, int& bestCost, int p, int size);
-void TspExploreToFirstSolution(int V, int** M, int p,int size);
+int ParallelTSP(int** M);
+void TspExploreToFirstSolution(int** M);
+
+/*******************GLOBAL VARIABLES ****************/
 int counter;
 int maxDeep;
+int** C; 
+int V; 
+int* Bestsolution;
+int bestCost; 
+int p; 
+int size;
+MPI_Request request;
+MPI_Status status;
+int besttmp;
+int bestIsMine;
+/*******************GLOBAL VARIABLES ****************/
+
 int main(int argc, char* argv[]) {
 
 
 
     ifstream myfile;
-    int V;
     if (argc != 2) {
         cout << "Error - number of parameter\nUsage: program ./file_distance.txt\nfile_distance must contain the number of vertex and then the distance between them, example:\n4\n0 1 2 3\n1 0 4 5\n2 4 0 6\n3 5 6 0 " << endl;
     }
@@ -49,7 +64,7 @@ int main(int argc, char* argv[]) {
         cout << "Number of nodes not correct";
         return 1;
     }
-    int** C = createFirstSol(V);
+    C = createFirstSol(V);
     for (int i = 0; i < V; i++) {
         for (int j = 0; j < V; j++) {
             myfile >> C[i][j];
@@ -58,11 +73,12 @@ int main(int argc, char* argv[]) {
     myfile.close();
     /********************************Read file ******************************/
     int** firstSol = createFirstSol(V);
-    int* finalSol = (int*)(calloc(V, sizeof(int)));
-    int finalCost = INT_MAX;
+    Bestsolution = (int*)(calloc(V+1, sizeof(int)));
+    bestCost = INT_MAX;
     int firstBound = ComputeLowerBound(firstSol, V, C);
-    int size, p;
-
+    counter=0;
+    maxDeep=0;
+    bestIsMine=0;
     MPI_Status status;
     MPI_Init(&argc, &argv);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
@@ -70,10 +86,9 @@ int main(int argc, char* argv[]) {
     double duration;
 
     auto start = chrono::steady_clock::now();
-    counter=0;
-    maxDeep=0;
+
     //cout<<"size:"<<size<<endl;;
-    int flag=ParallelTSP(C, V, firstSol, finalSol, finalCost,p,size);
+    ParallelTSP(firstSol);
 
 
 
@@ -87,52 +102,65 @@ int main(int argc, char* argv[]) {
     cout << "Processor: "<<p<<endl;
     cout << "Time elapsed: " << duration << "ms" << endl;
     cout << "State explored counter: "<<counter<<endl;
-    cout << "My optimal cost: "<<finalCost<<endl;
+    cout << "My optimal cost: "<<bestCost<<endl;
     cout << "Deepth explored: "<<maxDeep<<endl;
     
-    if(flag==0){
-        finalCost  = INT_MAX;
+    if(bestIsMine==0){
+        bestCost  = INT_MAX;
     }
     MPI_Barrier( MPI_COMM_WORLD );
     int *solList = (int *)malloc(sizeof(int) * size);
-    MPI_Allgather(&finalCost, 1, MPI_INT, solList, 1, MPI_INT, MPI_COMM_WORLD);
+    MPI_Allgather(&bestCost, 1, MPI_INT, solList, 1, MPI_INT, MPI_COMM_WORLD);
     int min_idx = min_element(solList,solList+size) - solList;
 
     if(p==min_idx){
-        cout <<endl<<endl<< "Final solution from "<<p<<" :\n" << "Cost:" << finalCost << endl << "Path:" << endl;
+        cout <<endl<<endl<< "Final solution from "<<p<<" :\n" << "Cost:" << bestCost << endl << "Path:" << endl;
         for (int i = 0; i < V + 1; i++) {
-            cout << finalSol[i] << " ";
+            cout << Bestsolution[i] << " ";
         }
 
     cout<<endl;
     }
 
-
+    free(solList);
+    free(Bestsolution);
     MPI_Finalize();
     return 0;
 }
 
-int ParallelTSP(int** C, int V, int** M, int* Bestsolution, int& bestCost,int p, int size)
+int ParallelTSP(int** M)
 {
 
-    TspExploreToFirstSolution(V,M,p,size);
-    //printLog("Processor "+to_string(p)+" will start from this solution", M, V);
-    MPI_Request request;
-    MPI_Status status;
-    int besttmp;
-    int bestIsMine=0;
-	TspStep( C,  V, M,  Bestsolution, bestCost, p,size,request,status,0, &besttmp, &bestIsMine);
+    TspExploreToFirstSolution(M);
+    if(DEBUGLOG){
+        if(p==0){
+            printLog("Processor "+to_string(p)+" will start from this solution", M, V);
+            MPI_Send(&bestCost, 1, MPI_INT, p+1, 0, MPI_COMM_WORLD);
+        }else if(p==(size-1)){
+            MPI_Recv(&bestCost, 1, MPI_INT, p-1, 0, MPI_COMM_WORLD,MPI_STATUS_IGNORE);
+            printLog("Processor "+to_string(p)+" will start from this solution", M, V);
+        }else{
+            MPI_Recv(&bestCost, 1, MPI_INT, p-1, 0, MPI_COMM_WORLD,MPI_STATUS_IGNORE);
+
+            cout<<p<<" "<<size<<endl;
+            printLog("Processor "+to_string(p)+" will start from this solution", M, V);
+            MPI_Send(&bestCost, 1, MPI_INT, p+1, 0, MPI_COMM_WORLD);
+        }
+        MPI_Barrier( MPI_COMM_WORLD );
+    }
+	TspStep(M,0);
     return bestIsMine;
 }
 
 
-void TspExploreToFirstSolution(int V, int** M, int p,int size){
+void TspExploreToFirstSolution(int** M){
 
     int choice;
+    int p_tmp=p;
+    int size_tmp=size;
+    for(;size_tmp!=1;p_tmp=p>>1,size_tmp=size_tmp>>1){
 
-    for(;size!=1;p=p>>1,size=size>>1){
-
-        choice=p%2;
+        choice=p_tmp%2;
         //printLog("Processor "+to_string(p)+" generated this solution", M, V);
         pair<int, int> idx = findNextChild(M, V);
         int i = idx.first;
@@ -149,7 +177,7 @@ void TspExploreToFirstSolution(int V, int** M, int p,int size){
 
 }
 
-void TspStep(int** C, int V, int** M, int* Bestsolution, int& bestCost, int p, int size,MPI_Request request, MPI_Status status, int step, int* besttmp, int* bestIsMine)
+void TspStep(int** M, int step)
 {
     
     counter++; //Global variable, it count the number of "nodes" in the tree visidet for each processor
@@ -160,19 +188,19 @@ void TspStep(int** C, int V, int** M, int* Bestsolution, int& bestCost, int p, i
     if(COMUNICATION_SWITCH){ //constant ( #define  on top ) to enable/disable comunication between processors
     int flag=0; //flag == 1 if it will recieve a new solution from another processor
         if(step==0){ // first time
-            MPI_Irecv(besttmp, 1, MPI_INT, MPI_ANY_SOURCE,0, MPI_COMM_WORLD, &request); //Non blocking recv from all other processor to exange the best sol
+            MPI_Irecv(&besttmp, 1, MPI_INT, MPI_ANY_SOURCE,0, MPI_COMM_WORLD, &request); //Non blocking recv from all other processor to exange the best sol
             MPI_Test(&request, &flag, &status); //Test if I recived something from someone else 
-        }else if(counter%500==0) { // Polling each 500 state visited.
+        }else if(counter%POLLINGRATE==0) { // Polling each 500 state visited.
             MPI_Test(&request, &flag, &status);
         }
         if(flag!=0){ //IF p recived  something
         
-        cout<<"I am "<<p<<"  today  "<<status.MPI_SOURCE<< "  sent me something: "<<*besttmp<<endl;
-        cout<<"My current best is "<<bestCost<<endl;
-            if(*besttmp<bestCost){ //And the solution recived is better than mine
-            cout<<"Updating value!"<<endl;
-                bestCost=*besttmp; //Update my solution
-                *bestIsMine=0; //Flag that says that I am not the processor that has the optimal solution
+        if(DEBUGLOG){cout<<"I am "<<p<<"  today  "<<status.MPI_SOURCE<< "  sent me something: "<<besttmp<<endl;}
+        if(DEBUGLOG){cout<<"My current best is "<<bestCost<<endl;}
+            if(besttmp<bestCost){ //And the solution recived is better than mine
+        if(DEBUGLOG){   cout<<"Updating value!"<<endl;}
+                bestCost=besttmp; //Update my solution
+                bestIsMine=0; //Flag that says that I am not the processor that has the optimal solution
             }
             MPI_Irecv(&besttmp, 1, MPI_INT, MPI_ANY_SOURCE,0, MPI_COMM_WORLD, &request); //p open a new comunication channel, to wait for new sol
         }
@@ -185,8 +213,8 @@ void TspStep(int** C, int V, int** M, int* Bestsolution, int& bestCost, int p, i
         if (tmp_cost < bestCost && checkFinalSol(M, V)) { //check bestCost and if finalSol is correct 
             bestCost = tmp_cost;
             saveBestSol(Bestsolution, M, V);
-            *bestIsMine=1;
-            cout<<"Processor "<< p<< " Found a better solution : "<<bestCost<<endl;
+            bestIsMine=1;
+        if(DEBUGLOG){   cout<<"Processor "<< p << " Found a better solution : "<<bestCost<<endl;}
            if(COMUNICATION_SWITCH){ //Send to all the other p
                 for(int i=0;i<size;i++){
                     if(i!=p){
@@ -233,7 +261,7 @@ void TspStep(int** C, int V, int** M, int* Bestsolution, int& bestCost, int p, i
 
         //printLog("Adding constraint", M, V);
         if (lowerBoundA < bestCost && checkConstrain(M, V)) {
-            TspStep(C, V, M, Bestsolution, bestCost,p,size,request,  status, step+1,besttmp,bestIsMine);
+            TspStep(M,step+1);
         }
 
         rollBackChanges(M, V, changeLogA);
@@ -247,7 +275,7 @@ void TspStep(int** C, int V, int** M, int* Bestsolution, int& bestCost, int p, i
 
         //printLog("Adding constraints", M, V);
         if (lowerBoundB < bestCost && checkConstrain(M, V)) {
-            TspStep(C, V, M, Bestsolution, bestCost,p,size,request,  status, step+1 ,besttmp,bestIsMine);
+            TspStep(M,step+1);
         }
         rollBackChanges(M, V, changeLogA);
 
@@ -267,7 +295,7 @@ void TspStep(int** C, int V, int** M, int* Bestsolution, int& bestCost, int p, i
 
         //printLog("Adding constraints", M, V);
         if (lowerBoundB < bestCost && checkConstrain(M, V)) {
-            TspStep(C, V, M, Bestsolution, bestCost,p,size,request,  status, step+1 ,besttmp,bestIsMine);
+            TspStep(M,step+1);
         }
         rollBackChanges(M, V, changeLogA);
 
@@ -280,7 +308,7 @@ void TspStep(int** C, int V, int** M, int* Bestsolution, int& bestCost, int p, i
 
         //printLog("adding constraints", M, V);
         if (lowerBoundA < bestCost && checkConstrain(M, V)) {
-            TspStep(C, V, M, Bestsolution, bestCost,p,size,request,  status, step+1 ,besttmp, bestIsMine);
+            TspStep(M,step+1);
         }
         rollBackChanges(M, V, changeLogA);
 
