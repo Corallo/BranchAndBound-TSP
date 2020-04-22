@@ -37,6 +37,7 @@ void sendStatusInfoToAll(int status);
 int workState();
 /*******************GLOBAL VARIABLES ****************/
 int counter;
+int ciao;
 int maxDeep;
 int** C; 
 int V; 
